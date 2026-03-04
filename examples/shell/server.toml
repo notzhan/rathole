@@ -1,0 +1,12 @@
+# Server configuration for exposing a remote shell service.
+#
+# The server listens for rathole client connections on port 2333.
+# When a shell client connects to port 2222, the traffic is forwarded
+# to the rathole client which spawns an interactive shell (with PTY).
+[server]
+bind_addr = "0.0.0.0:2333"
+default_token = "changeme"
+
+[server.services.shell]
+type = "shell"
+bind_addr = "0.0.0.0:2222"

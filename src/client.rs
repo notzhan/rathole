@@ -229,6 +229,12 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
             }
             run_data_channel_for_udp::<T>(conn, &args.service.local_addr, args.service.prefer_ipv6).await?;
         }
+        DataChannelCmd::StartForwardShell => {
+            if args.service.service_type != ServiceType::Shell {
+                bail!("Expect Shell traffic. Please check the configuration.")
+            }
+            run_data_channel_for_shell::<T>(conn).await?;
+        }
     }
     Ok(())
 }
@@ -246,6 +252,135 @@ async fn run_data_channel_for_tcp<T: Transport>(
         .with_context(|| format!("Failed to connect to {}", local_addr))?;
     let _ = copy_bidirectional(&mut conn, &mut local).await;
     Ok(())
+}
+
+// Returns the shell executable to use for spawning a remote shell.
+#[cfg(feature = "shell")]
+fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "cmd".to_string()
+        } else {
+            "/bin/sh".to_string()
+        }
+    })
+}
+
+// Spawn a shell and bridge its I/O to the data channel connection using a PTY.
+// This gives full interactive shell support (colours, readline, vi, etc.).
+#[cfg(feature = "shell")]
+#[instrument(skip(conn))]
+async fn run_data_channel_for_shell<T: Transport>(conn: T::Stream) -> Result<()> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::{Read, Write};
+
+    debug!("New shell data channel");
+
+    let pty_system = native_pty_system();
+    let pty_pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .with_context(|| "Failed to open PTY")?;
+
+    let shell = default_shell();
+
+    let cmd = CommandBuilder::new(&shell);
+    let mut child = pty_pair
+        .slave
+        .spawn_command(cmd)
+        .with_context(|| format!("Failed to spawn shell: {}", shell))?;
+    // Close the slave end in the parent process so that EOF propagates correctly
+    drop(pty_pair.slave);
+
+    let mut master_reader = pty_pair
+        .master
+        .try_clone_reader()
+        .with_context(|| "Failed to clone PTY reader")?;
+    let mut master_writer = pty_pair
+        .master
+        .take_writer()
+        .with_context(|| "Failed to take PTY writer")?;
+
+    // Channel carrying data from the PTY master → TCP connection
+    let (pty_out_tx, mut pty_out_rx) = mpsc::channel::<Bytes>(64);
+    // Channel carrying data from the TCP connection → PTY master
+    let (conn_in_tx, mut conn_in_rx) = mpsc::channel::<Bytes>(64);
+
+    // Blocking task: read from PTY master and forward through the channel
+    tokio::task::spawn_blocking(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match master_reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let data = Bytes::copy_from_slice(&buf[..n]);
+                    if pty_out_tx.blocking_send(data).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    // Blocking task: receive from the channel and write to PTY master
+    tokio::task::spawn_blocking(move || {
+        while let Some(data) = conn_in_rx.blocking_recv() {
+            if master_writer.write_all(&data).is_err() {
+                break;
+            }
+            let _ = master_writer.flush();
+        }
+    });
+
+    let (mut conn_rd, mut conn_wr) = io::split(conn);
+
+    // Async task: copy from TCP connection → PTY via the channel
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        loop {
+            match conn_rd.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let data = Bytes::copy_from_slice(&buf[..n]);
+                    if conn_in_tx.send(data).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    // Main: copy from PTY → TCP connection
+    while let Some(data) = pty_out_rx.recv().await {
+        if conn_wr.write_all(&data).await.is_err() {
+            break;
+        }
+        let _ = conn_wr.flush().await;
+    }
+
+    // Wait for the child process to exit and log non-zero exit codes
+    match child.wait() {
+        Ok(status) => {
+            if !status.success() {
+                debug!("Shell exited with non-zero status: {:?}", status);
+            }
+        }
+        Err(e) => {
+            debug!("Failed to wait for shell process: {:#}", e);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "shell"))]
+#[instrument(skip(_conn))]
+async fn run_data_channel_for_shell<T: Transport>(_conn: T::Stream) -> Result<()> {
+    crate::helper::feature_not_compile("shell")
 }
 
 // Things get a little tricker when it gets to UDP because it's connection-less.
