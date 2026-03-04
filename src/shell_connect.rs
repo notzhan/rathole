@@ -15,6 +15,11 @@ pub async fn run(addr: &str) -> Result<()> {
         .await
         .with_context(|| format!("Failed to connect to {}", addr))?;
 
+    // Disable Nagle's algorithm for lower keystroke latency.
+    stream
+        .set_nodelay(true)
+        .with_context(|| "Failed to set TCP_NODELAY")?;
+
     info!("Connected. Press Ctrl+C or close the connection to exit.");
 
     // Put the local terminal into raw mode so that all key-strokes (including
@@ -36,20 +41,39 @@ pub async fn run(addr: &str) -> Result<()> {
 }
 
 async fn forward(stream: TcpStream) -> Result<()> {
+    use std::io::Read;
+    use tokio::sync::mpsc;
+
     let (mut tcp_rd, mut tcp_wr) = stream.into_split();
 
-    // Spawn a task that copies stdin → TCP
-    let write_task = tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
+    // Use a regular OS thread for stdin so that the tokio runtime is not
+    // blocked waiting for the stdin read to complete when the session ends.
+    // tokio::io::stdin() uses an internal blocking thread that cannot be
+    // cancelled, which would prevent the process from exiting after the
+    // connection closes.  A plain OS thread is not tracked by the tokio
+    // runtime, so the runtime can shut down cleanly even if the thread is
+    // still blocked inside read(2).
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin();
         let mut buf = [0u8; 4096];
         loop {
-            match stdin.read(&mut buf).await {
+            match stdin.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if tcp_wr.write_all(&buf[..n]).await.is_err() {
+                    if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
                         break;
                     }
                 }
+            }
+        }
+    });
+
+    // Async task: drain the stdin channel and forward bytes to the TCP stream.
+    let write_task = tokio::spawn(async move {
+        while let Some(data) = stdin_rx.recv().await {
+            if tcp_wr.write_all(&data).await.is_err() {
+                break;
             }
         }
     });

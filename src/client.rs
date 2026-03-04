@@ -339,7 +339,7 @@ async fn run_data_channel_for_shell<T: Transport>(conn: T::Stream) -> Result<()>
     let (mut conn_rd, mut conn_wr) = io::split(conn);
 
     // Async task: copy from TCP connection → PTY via the channel
-    tokio::spawn(async move {
+    let conn_rd_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 4096];
         loop {
             match conn_rd.read(&mut buf).await {
@@ -361,6 +361,12 @@ async fn run_data_channel_for_shell<T: Transport>(conn: T::Stream) -> Result<()>
         }
         let _ = conn_wr.flush().await;
     }
+
+    // Gracefully shut down the connection so the visitor (shell-connect client)
+    // sees EOF and can exit cleanly.  Without this, `conn_rd` remains alive in
+    // its task and keeps the TCP socket open indefinitely after the shell exits.
+    let _ = conn_wr.shutdown().await;
+    conn_rd_task.abort();
 
     // Wait for the child process to exit and log non-zero exit codes
     match child.wait() {
