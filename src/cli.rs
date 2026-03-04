@@ -42,7 +42,7 @@ cargo Features:      {}
 #[clap(group(
             ArgGroup::new("cmds")
                 .required(true)
-                .args(&["CONFIG", "genkey"]),
+                .args(&["CONFIG", "genkey", "shell-connect"]),
         ))]
 pub struct Cli {
     /// The path to the configuration file
@@ -65,4 +65,13 @@ pub struct Cli {
     /// The DH function to use is x25519
     #[clap(long, arg_enum, value_name = "CURVE")]
     pub genkey: Option<Option<KeypairType>>,
+
+    /// Connect to a remote shell service exposed by a rathole server.
+    ///
+    /// Provide the address (host:port) of the shell service port on the server,
+    /// e.g. `--shell-connect 1.2.3.4:2222`.
+    /// The local terminal is put into raw mode so the remote shell is fully
+    /// interactive (readline, vi, colours, etc.).
+    #[clap(long, value_name = "ADDR")]
+    pub shell_connect: Option<String>,
 }

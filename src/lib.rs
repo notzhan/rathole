@@ -26,6 +26,9 @@ mod server;
 #[cfg(feature = "server")]
 use server::run_server;
 
+#[cfg(feature = "shell")]
+mod shell_connect;
+
 use crate::config_watcher::{ConfigChange, ConfigWatcherHandle};
 
 const DEFAULT_CURVE: KeypairType = KeypairType::X25519;
@@ -62,6 +65,14 @@ fn genkey(curve: Option<KeypairType>) -> Result<()> {
 pub async fn run(args: Cli, shutdown_rx: broadcast::Receiver<bool>) -> Result<()> {
     if args.genkey.is_some() {
         return genkey(args.genkey.unwrap());
+    }
+
+    // shell-connect mode: no config file needed
+    if let Some(addr) = args.shell_connect.as_ref() {
+        #[cfg(feature = "shell")]
+        return shell_connect::run(addr).await;
+        #[cfg(not(feature = "shell"))]
+        return crate::helper::feature_not_compile("shell");
     }
 
     // Raise `nofile` limit on linux and mac

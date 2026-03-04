@@ -415,7 +415,7 @@ where
 
         // Cache some data channels for later use
         let pool_size = match service.service_type {
-            ServiceType::Tcp => TCP_POOL_SIZE,
+            ServiceType::Tcp | ServiceType::Shell => TCP_POOL_SIZE,
             ServiceType::Udp => UDP_POOL_SIZE,
         };
 
@@ -430,14 +430,32 @@ where
         match service.service_type {
             ServiceType::Tcp => tokio::spawn(
                 async move {
-                    if let Err(e) = run_tcp_connection_pool::<T>(
+                    if let Err(e) = run_stream_connection_pool::<T>(
                         bind_addr,
+                        DataChannelCmd::StartForwardTcp,
                         data_ch_rx,
                         data_ch_req_tx,
                         shutdown_rx_clone,
                     )
                     .await
                     .with_context(|| "Failed to run TCP connection pool")
+                    {
+                        error!("{:#}", e);
+                    }
+                }
+                .instrument(Span::current()),
+            ),
+            ServiceType::Shell => tokio::spawn(
+                async move {
+                    if let Err(e) = run_stream_connection_pool::<T>(
+                        bind_addr,
+                        DataChannelCmd::StartForwardShell,
+                        data_ch_rx,
+                        data_ch_req_tx,
+                        shutdown_rx_clone,
+                    )
+                    .await
+                    .with_context(|| "Failed to run shell connection pool")
                     {
                         error!("{:#}", e);
                     }
@@ -453,7 +471,7 @@ where
                         shutdown_rx_clone,
                     )
                     .await
-                    .with_context(|| "Failed to run TCP connection pool")
+                    .with_context(|| "Failed to run UDP connection pool")
                     {
                         error!("{:#}", e);
                     }
@@ -623,14 +641,15 @@ fn tcp_listen_and_send(
 }
 
 #[instrument(skip_all)]
-async fn run_tcp_connection_pool<T: Transport>(
+async fn run_stream_connection_pool<T: Transport>(
     bind_addr: String,
+    forward_cmd: DataChannelCmd,
     mut data_ch_rx: mpsc::Receiver<T::Stream>,
     data_ch_req_tx: mpsc::UnboundedSender<bool>,
     shutdown_rx: broadcast::Receiver<bool>,
 ) -> Result<()> {
     let mut visitor_rx = tcp_listen_and_send(bind_addr, data_ch_req_tx.clone(), shutdown_rx);
-    let cmd = bincode::serialize(&DataChannelCmd::StartForwardTcp).unwrap();
+    let cmd = bincode::serialize(&forward_cmd).unwrap();
 
     'pool: while let Some(mut visitor) = visitor_rx.recv().await {
         loop {

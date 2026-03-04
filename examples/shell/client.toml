@@ -1,0 +1,13 @@
+# Client configuration for the machine that provides the remote shell.
+#
+# This rathole client runs on the machine you want to reach remotely (e.g.
+# a host behind NAT).  It connects back to the public rathole server and
+# registers a "shell" service.  Whenever someone connects to
+# server:2222, this client spawns a PTY-backed shell and bridges the I/O.
+[client]
+remote_addr = "server.example.com:2333"
+default_token = "changeme"
+
+[client.services.shell]
+type = "shell"
+# Note: local_addr is not needed for shell services

@@ -62,6 +62,7 @@ pub struct ClientServiceConfig {
     pub service_type: ServiceType,
     #[serde(skip)]
     pub name: String,
+    #[serde(default)]
     pub local_addr: String,
     #[serde(default)] // Default to false
     pub prefer_ipv6: bool,
@@ -86,6 +87,8 @@ pub enum ServiceType {
     Tcp,
     #[serde(rename = "udp")]
     Udp,
+    #[serde(rename = "shell")]
+    Shell,
 }
 
 fn default_service_type() -> ServiceType {
@@ -284,6 +287,15 @@ impl Config {
             }
             if s.retry_interval.is_none() {
                 s.retry_interval = Some(client.retry_interval);
+            }
+            // local_addr is required for tcp/udp services, but not for shell
+            if s.service_type != ServiceType::Shell && s.local_addr.is_empty() {
+                bail!(
+                    "The local_addr of service {} is not set. \
+                     local_addr is required for tcp and udp service types, \
+                     but not for the shell service type.",
+                    name
+                );
             }
         }
 
